@@ -1,112 +1,94 @@
-//  Wizz-AI
-//
-//  Created by Gabriel on 4/10/24.
-//
-
 import SwiftUI
 import CoreMotion
-import Foundation
 
-// ViewModel to manage the accelerometer
-class MotionManager: ObservableObject {
-    private var motionManager: CMMotionManager
-
-    // Published properties that the ContentView can observe
-    @Published var x: Double = 0.0
-    @Published var y: Double = 0.0
-    @Published var z: Double = 0.0
-
+class MotionViewModel: ObservableObject {
+    private var motionManager: CMMotionManager?
+    private var timer: Timer?
+    private var dataBuffer: [(x: Double, y: Double, z: Double, timestamp: Date)] = []
+    
+    @Published var x: Double = 0
+    @Published var y: Double = 0
+    @Published var z: Double = 0
+    @Published var totalJumps: Int = 0
+    
     init() {
-        self.motionManager = CMMotionManager()
-        self.motionManager.accelerometerUpdateInterval = 1/60 // 60 Hz
+        motionManager = CMMotionManager()
+        motionManager?.accelerometerUpdateInterval = 0.1  // Updates every 0.1 seconds
+        startMotionUpdates()
+        startSendingData()
     }
     
-    func startAccelerometer() {
-        // Check if the accelerometer is available before trying to start updates
-        guard motionManager.isAccelerometerAvailable else { return }
-        
-        // Start the accelerometer updates
-        motionManager.startAccelerometerUpdates(to: .main) { [weak self] (data, error) in
-            // Make sure there is data, otherwise return
+    func startMotionUpdates() {
+        motionManager?.startAccelerometerUpdates(to: .main) { [weak self] (data, error) in
             guard let data = data, error == nil else { return }
-            
-            // Update the published properties with the new data
             DispatchQueue.main.async {
-                self?.x = data.acceleration.x
-                self?.y = data.acceleration.y
-                self?.z = data.acceleration.z
+                self?.updateBuffer(with: data.acceleration)
             }
         }
     }
     
-    func stopAccelerometer() {
-        motionManager.stopAccelerometerUpdates()
+    private func updateBuffer(with acceleration: CMAcceleration) {
+        self.x = acceleration.x
+        self.y = acceleration.y
+        self.z = acceleration.z
+        
+        // Append data with timestamp
+        dataBuffer.append((x: acceleration.x, y: acceleration.y, z: acceleration.z, timestamp: Date()))
+        
+        // Remove data older than 5 seconds (since we're now sending every 5 seconds)
+        let thresholdDate = Date().addingTimeInterval(-5)
+        dataBuffer = dataBuffer.filter { $0.timestamp > thresholdDate }
     }
-}
-
-extension MotionManager {
+    
+    func startSendingData() {
+        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.sendDataToServer()
+        }
+    }
+    
     func sendDataToServer() {
-        guard let url = URL(string: "http://yourserver.com/process") else { return }
-
-        // Prepare your accelerometer data
-        let data = [
-            "x": self.x,
-            "y": self.y,
-            "z": self.z
-        ]
-
-        // Convert your data to JSON
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: data) else { return }
-
-        // Create a URLRequest and set its HTTP method to POST
+        guard let url = URL(string: "http://10.150.96.212:5001/process") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        // Attach your JSON data to the request
-        request.httpBody = jsonData
-
-        // Create a URLSession data task to send the data
-        let task = URLSession.shared.dataTask(with: request) { (data, response, error) in
-            // Handle the response here
-            guard let data = data, error == nil else { return }
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        // Send the last 5 seconds of data
+        let jsonData = dataBuffer.map { ["x": $0.x, "y": $0.y, "z": $0.z] }
+        
+        guard let httpBody = try? JSONEncoder().encode(jsonData) else {
+            print("Error encoding JSON")
+            return
+        }
+        request.httpBody = httpBody
+        
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
-                // Optionally handle the response JSON if your server sends back a result
-                if let result = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
-                    print(result)
+                guard let data = data else { return }
+                do {
+                    let jsonResponse = try JSONDecoder().decode([String: Int].self, from: data)
+                    DispatchQueue.main.async {
+                        self?.totalJumps = jsonResponse["jumps_per_minute"] ?? 0
+                    }
+                } catch {
+                    print("Error decoding response: \(error)")
                 }
             }
-        }
-
-        task.resume()  // Start the data task
+        }.resume()
     }
 }
 
-
-
 struct ContentView: View {
-    @StateObject private var motionManager = MotionManager()
+    @StateObject private var motionViewModel = MotionViewModel()
     
     var body: some View {
         VStack {
-            Text("Accelerometer Data")
-            Text("X: \(motionManager.x)")
-            Text("Y: \(motionManager.y)")
-            Text("Z: \(motionManager.z)")
-        }
-        .onAppear {
-            motionManager.startAccelerometer()
-        }
-        .onDisappear {
-            motionManager.stopAccelerometer()
+            Text("X: \(motionViewModel.x, specifier: "%.2f")")
+            Text("Y: \(motionViewModel.y, specifier: "%.2f")")
+            Text("Z: \(motionViewModel.z, specifier: "%.2f")")
+            Text("Jumps per Minute: \(motionViewModel.totalJumps)")
+                .padding()
+                .font(.title)
         }
         .padding()
-    }
-}
-
-// Replace the preview provider if you have one
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
     }
 }
