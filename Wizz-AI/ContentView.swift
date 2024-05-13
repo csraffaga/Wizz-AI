@@ -1,5 +1,12 @@
 import SwiftUI
 import CoreMotion
+import AVFoundation
+
+// Define a structure to represent the server response
+struct ServerResponse: Decodable {
+    var jumps_per_minute: Int
+    var song_path: String?  // song_path can be optional if not always present
+}
 
 class MotionViewModel: ObservableObject {
     private var motionManager: CMMotionManager?
@@ -11,11 +18,16 @@ class MotionViewModel: ObservableObject {
     @Published var z: Double = 0
     @Published var totalJumps: Int = 0
     
+    // Updated to store AVPlayer as a class property
+    private var audioPlayer: AVPlayer?
+    private var currentSongPath: String?  // Store the current song path
+
     init() {
         motionManager = CMMotionManager()
         motionManager?.accelerometerUpdateInterval = 0.1  // Updates every 0.1 seconds
         startMotionUpdates()
         startSendingData()
+        setupAudioSession()  // Setup the audio session
     }
     
     func startMotionUpdates() {
@@ -31,28 +43,23 @@ class MotionViewModel: ObservableObject {
         self.x = acceleration.x
         self.y = acceleration.y
         self.z = acceleration.z
-        
-        // Append data with timestamp
         dataBuffer.append((x: acceleration.x, y: acceleration.y, z: acceleration.z, timestamp: Date()))
-        
-        // Remove data older than 5 seconds (since we're now sending every 5 seconds)
-        let thresholdDate = Date().addingTimeInterval(-5)
+        let thresholdDate = Date().addingTimeInterval(-12)
         dataBuffer = dataBuffer.filter { $0.timestamp > thresholdDate }
     }
     
     func startSendingData() {
-        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 12.0, repeats: true) { [weak self] _ in
             self?.sendDataToServer()
         }
     }
     
     func sendDataToServer() {
-        guard let url = URL(string: "http://10.150.96.212:5001/process") else { return }
+        guard let url = URL(string: "http://10.0.0.209:5001/process") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        // Send the last 5 seconds of data
         let jsonData = dataBuffer.map { ["x": $0.x, "y": $0.y, "z": $0.z] }
         
         guard let httpBody = try? JSONEncoder().encode(jsonData) else {
@@ -65,15 +72,65 @@ class MotionViewModel: ObservableObject {
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
                 guard let data = data else { return }
                 do {
-                    let jsonResponse = try JSONDecoder().decode([String: Int].self, from: data)
+                    let jsonResponse = try JSONDecoder().decode(ServerResponse.self, from: data)
                     DispatchQueue.main.async {
-                        self?.totalJumps = jsonResponse["jumps_per_minute"] ?? 0
+                        self?.totalJumps = jsonResponse.jumps_per_minute
+                        // Check if the song path has changed before deciding to change the track
+                        if let songPath = jsonResponse.song_path, self?.currentSongPath != songPath {
+                            self?.playSong(atPath: songPath)
+                            self?.currentSongPath = songPath  // Update the current song path
+                        }
                     }
                 } catch {
                     print("Error decoding response: \(error)")
                 }
             }
         }.resume()
+    }
+    
+    func fetchJumpsPerMinute() {
+        guard let url = URL(string: "http://10.0.0.209:5001/get_jpm") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                guard let data = data else { return }
+                do {
+                    let jsonResponse = try JSONDecoder().decode(ServerResponse.self, from: data)
+                    DispatchQueue.main.async {
+                        self?.totalJumps = jsonResponse.jumps_per_minute
+                        // Check if the song path has changed before deciding to change the track
+                        if let songPath = jsonResponse.song_path, self?.currentSongPath != songPath {
+                            self?.playSong(atPath: songPath)
+                            self?.currentSongPath = songPath  // Update the current song path
+                        }
+                    }
+                } catch {
+                    print("Error decoding response: \(error)")
+                }
+            }
+        }.resume()
+    }
+
+    func playSong(atPath path: String) {
+        guard let url = URL(string: path) else {
+            print("Invalid song URL")
+            return
+        }
+        let playerItem = AVPlayerItem(url: url)
+        audioPlayer = AVPlayer(playerItem: playerItem)
+        audioPlayer?.play()
+    }
+    
+    // Added function to setup audio session
+    private func setupAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback)
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("Failed to set up audio session: \(error)")
+        }
     }
 }
 
@@ -90,5 +147,10 @@ struct ContentView: View {
                 .font(.title)
         }
         .padding()
+        .onAppear {
+            Timer.scheduledTimer(withTimeInterval: 12.0, repeats: true) { _ in
+                motionViewModel.fetchJumpsPerMinute()
+            }
+        }
     }
 }
