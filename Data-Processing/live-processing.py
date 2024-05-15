@@ -5,15 +5,17 @@ import os
 import random
 from flask import Flask, send_from_directory
 from urllib.parse import quote
+import eyed3
 
 app = Flask(__name__)
 
 latest_jumps_per_minute = 0
 current_song_path = ""
+song_data = ""
 
 @app.route('/process', methods=['POST'])
 def process_data():
-    global latest_jumps_per_minute, current_song_path
+    global latest_jumps_per_minute, current_song_path, song_data
     try:
         data = request.json
         current_time = time.time()
@@ -31,10 +33,18 @@ def process_data():
 
         latest_jumps_per_minute = jumps_per_minute
         current_song_path = select_song(jumps_per_minute)
-
+        song_data = current_song_path[0].tag
+        print(song_data.artist)
+        print(song_data.title)
+        for image in song_data.images:
+            print(image)
+        if song_data.title + "cover.jpg" not in os.listdir(SONGS_DIRECTORY):
+            image_file = open("../Wizz_songs/"+song_data.title + "cover.jpg", "wb")
+            image_file.write(song_data.images[0].image_data)
+            image_file.close()
         print(f"Jumps per minute: {jumps_per_minute}")
-        print(f"Selected song path: {current_song_path}")
-        result = {"jumps_per_minute": jumps_per_minute, "song_path": current_song_path}
+        print(f"Selected song path: {current_song_path[1]}")
+        result = {"jumps_per_minute": jumps_per_minute, "song_path": current_song_path[1], "song_name": song_data.title, "song_artist": song_data.artist, "song_cover_path": f"http://10.0.0.229:5006/songs/{song_data.title + "cover.jpg"}"}
         return jsonify(result)
     except Exception as e:
         print(f"Error processing data: {str(e)}")
@@ -42,8 +52,8 @@ def process_data():
 
 @app.route('/get_jpm', methods=['GET'])
 def get_jpm():
-    global latest_jumps_per_minute, current_song_path
-    return jsonify({"jumps_per_minute": latest_jumps_per_minute, "song_path": current_song_path})
+    global latest_jumps_per_minute, current_song_path, song_data
+    return jsonify({"jumps_per_minute": round(latest_jumps_per_minute), "song_path": current_song_path[1], "song_name": song_data.title, "song_artist": song_data.artist, "song_cover_path": f"http://10.0.0.229:5006/songs/{song_data.title + "cover.jpg"}"})
 
 def detect_jumps(z_data, threshold=0.0, min_interval=1):
     jumps = []
@@ -77,9 +87,10 @@ def select_song(bpm):
         if songs:
             selected_song = random.choice(songs)
             encoded_song = quote(selected_song)
-            return f"http://10.0.0.209:5001/songs/{folder_name}/{encoded_song}"
+            audio_file = eyed3.load(f"../Wizz_songs/{folder_name}/{selected_song}")
+            return (audio_file, f"http://10.0.0.229:5006/songs/{folder_name}/{encoded_song}")
     return None
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    app.run(debug=True, host='0.0.0.0', port=5006)
